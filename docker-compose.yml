@@ -1,0 +1,17 @@
+services:
+  event-ledger:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: event-ledger
+    ports:
+      - "8080:8080"
+    # Health check polls the paginated listing endpoint.
+    # Any 200 response confirms the DispatcherServlet, JPA layer, and H2 are all up.
+    # start_period gives the JVM time to start before failures count against retries.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://localhost:8080/ledger/events?account=_hc' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
