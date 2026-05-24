@@ -16,3 +16,12 @@ CREATE INDEX IF NOT EXISTS idx_te_account_id
 
 CREATE INDEX IF NOT EXISTS idx_te_event_timestamp
     ON transaction_events (event_timestamp);
+
+-- Composite index for the most common query pattern:
+--   WHERE account_id = ? ORDER BY event_timestamp ASC
+-- The leading account_id column satisfies the WHERE clause; the trailing
+-- event_timestamp column eliminates the sort step. This index also makes
+-- idx_te_account_id redundant (a composite index covers prefix-only lookups),
+-- but both are kept for clarity and backward compatibility.
+CREATE INDEX IF NOT EXISTS idx_te_account_event_time
+    ON transaction_events (account_id, event_timestamp);

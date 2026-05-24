@@ -8,33 +8,17 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.math.BigDecimal;
-import java.util.List;
 import java.util.Optional;
 
 public interface EventRepository extends JpaRepository<TransactionEvent, Long> {
 
     /**
      * Looks up a persisted event by its business key.
-     * Used during ingestion to retrieve an already-stored event when an idempotent
-     * re-submission arrives, so the service can return the original response without
-     * creating a duplicate record.
+     * Used during ingestion to return an already-stored event on idempotent
+     * re-submission, and to re-fetch the winner's record after a concurrent
+     * duplicate triggers a UNIQUE constraint violation.
      */
     Optional<TransactionEvent> findByEventId(String eventId);
-
-    /**
-     * Fast existence check on the business key before attempting an insert.
-     * Preferred over {@link #findByEventId} for the idempotency guard because it
-     * avoids loading the full entity when only a yes/no answer is needed.
-     */
-    boolean existsByEventId(String eventId);
-
-    /**
-     * Returns all events for an account sorted by the business-supplied event
-     * timestamp rather than by insertion time ({@code received_at}).
-     * Retained for internal use; prefer {@link #findByAccountId(String, Pageable)}
-     * for API-facing queries where callers control page size.
-     */
-    List<TransactionEvent> findByAccountIdOrderByEventTimestampAsc(String accountId);
 
     /**
      * Returns a paginated slice of events for an account.
@@ -45,11 +29,17 @@ public interface EventRepository extends JpaRepository<TransactionEvent, Long> {
     Page<TransactionEvent> findByAccountId(String accountId, Pageable pageable);
 
     /**
+     * Returns the account's earliest event (by business timestamp) in a single
+     * database round-trip. Used by the balance endpoint to determine the currency
+     * without loading all of the account's events.
+     * Returns {@link Optional#empty()} when the account has no recorded events.
+     */
+    Optional<TransactionEvent> findFirstByAccountIdOrderByEventTimestampAsc(String accountId);
+
+    /**
      * Computes the net balance for an account in a single database round-trip.
      * CREDITs add to the balance, DEBITs subtract. {@code COALESCE(..., 0)} ensures
-     * a zero is returned for accounts that exist in another context but have no
-     * recorded events, rather than a {@code null} that would require null-handling
-     * at the call site.
+     * a zero is returned rather than {@code null} when an account has no events.
      */
     @Query("""
             SELECT COALESCE(SUM(CASE WHEN e.type = 'CREDIT' THEN e.amount ELSE -e.amount END), 0)
@@ -57,19 +47,4 @@ public interface EventRepository extends JpaRepository<TransactionEvent, Long> {
             WHERE e.accountId = :accountId
             """)
     BigDecimal computeBalanceByAccountId(@Param("accountId") String accountId);
-
-    /**
-     * Returns the ordered sequence of currencies seen on an account's events.
-     * Ordered by {@code eventTimestamp ASC} so callers can detect currency changes
-     * over time (e.g. to assert single-currency invariants or build a timeline).
-     * The service layer is responsible for deduplication if only distinct values
-     * are needed.
-     */
-    @Query("""
-            SELECT e.currency
-            FROM TransactionEvent e
-            WHERE e.accountId = :accountId
-            ORDER BY e.eventTimestamp ASC
-            """)
-    List<String> findCurrencyByAccountId(@Param("accountId") String accountId);
 }

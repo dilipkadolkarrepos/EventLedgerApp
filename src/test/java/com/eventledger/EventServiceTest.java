@@ -19,7 +19,6 @@ import org.springframework.dao.DataIntegrityViolationException;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -149,8 +148,8 @@ class EventServiceTest {
      */
     @Test
     void getBalance_unknownAccount_throwsEventNotFoundException() {
-        when(eventRepository.findCurrencyByAccountId("acc-unknown"))
-                .thenReturn(List.of());
+        when(eventRepository.findFirstByAccountIdOrderByEventTimestampAsc("acc-unknown"))
+                .thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> eventService.getBalance("acc-unknown"))
                 .isInstanceOf(EventNotFoundException.class)
@@ -159,12 +158,12 @@ class EventServiceTest {
 
     /**
      * Balance and currency are derived from the repository and scaled to 4 d.p.
-     * Currency is the one from the earliest event (index 0 in the ordered list).
+     * Currency is taken from the account's earliest event.
      */
     @Test
     void getBalance_knownAccount_returnsCorrectResponse() {
-        when(eventRepository.findCurrencyByAccountId("acc-001"))
-                .thenReturn(List.of("USD", "USD"));
+        when(eventRepository.findFirstByAccountIdOrderByEventTimestampAsc("acc-001"))
+                .thenReturn(Optional.of(sampleEvent("evt-001")));
         when(eventRepository.computeBalanceByAccountId("acc-001"))
                 .thenReturn(new BigDecimal("350.00"));
 

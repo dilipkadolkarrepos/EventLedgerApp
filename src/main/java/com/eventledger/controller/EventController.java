@@ -47,9 +47,12 @@ public class EventController {
     @Operation(
             summary = "Submit a transaction event",
             description = """
-                    Records a new transaction event. Submitting the same `eventId` more than \
-                    once is safe — the original record is returned without a second write \
-                    (idempotent)."""
+                    Records a new transaction event.\s
+                    **Idempotency (serial):** submitting the same `eventId` more than once is safe — \
+                    the original record is returned without a second write.\s
+                    **Idempotency (concurrent):** simultaneous requests carrying the same `eventId` \
+                    are also safe — the UNIQUE constraint on `event_id` guarantees at most one row \
+                    is written; any losing thread receives the same 200 response as a serial duplicate."""
     )
     @ApiResponses({
             @ApiResponse(responseCode = "201", description = "Event persisted for the first time",

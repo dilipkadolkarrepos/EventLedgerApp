@@ -21,7 +21,6 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
-import java.util.List;
 import java.util.Optional;
 
 @Service
@@ -110,20 +109,6 @@ public class EventService {
     }
 
     /**
-     * Returns the full, unsliced ordered ledger for an account.
-     * Ordering is by the business-supplied {@code eventTimestamp}, not by insertion
-     * time, so out-of-order arrivals produce a chronologically correct history.
-     * Retained for internal/test use; the API layer calls the paginated overload.
-     */
-    @Transactional(readOnly = true)
-    public List<EventResponse> getEventsByAccount(String accountId) {
-        return eventRepository.findByAccountIdOrderByEventTimestampAsc(accountId)
-                .stream()
-                .map(EventResponse::from)
-                .toList();
-    }
-
-    /**
      * Returns a paginated, chronologically ordered ledger for an account.
      * Sort direction is enforced by the {@link Pageable} passed from the controller
      * ({@code eventTimestamp ASC}), so out-of-order arrivals are transparently
@@ -137,19 +122,17 @@ public class EventService {
 
     /**
      * Computes the net balance for an account by summing CREDITs and subtracting
-     * DEBITs in a single database round-trip. Currency is derived from the earliest
-     * event; the caller is responsible for asserting single-currency consistency
-     * before trusting the balance in a multi-currency scenario.
+     * DEBITs in a single database round-trip. Currency is taken from the account's
+     * earliest event fetched via a separate single-row query — no full table scan.
      */
     @Transactional(readOnly = true)
     public BalanceResponse getBalance(String accountId) {
-        List<String> currencies = eventRepository.findCurrencyByAccountId(accountId);
-        if (currencies.isEmpty()) {
-            throw new EventNotFoundException("No events found for accountId: " + accountId);
-        }
+        String currency = eventRepository.findFirstByAccountIdOrderByEventTimestampAsc(accountId)
+                .map(TransactionEvent::getCurrency)
+                .orElseThrow(() -> new EventNotFoundException("No events found for accountId: " + accountId));
         BigDecimal balance = eventRepository.computeBalanceByAccountId(accountId)
                 .setScale(4, RoundingMode.HALF_UP);
-        return new BalanceResponse(accountId, balance, currencies.get(0));
+        return new BalanceResponse(accountId, balance, currency);
     }
 
     // --- helpers ---

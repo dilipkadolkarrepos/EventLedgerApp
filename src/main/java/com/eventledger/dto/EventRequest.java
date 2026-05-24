@@ -10,6 +10,19 @@ import jakarta.validation.constraints.Pattern;
 import java.math.BigDecimal;
 import java.util.Map;
 
+/**
+ * Request body for submitting a transaction event.
+ *
+ * <p><b>Why {@code @JsonProperty} is present alongside the global {@code SNAKE_CASE} strategy</b>:
+ * The application sets {@code spring.jackson.property-naming-strategy=SNAKE_CASE}, which converts
+ * getter-derived names to snake_case for <em>both</em> serialisation and deserialisation.
+ * Without the explicit {@code @JsonProperty("camelCase")} annotations below, Jackson would
+ * expect the inbound JSON to use {@code "event_id"}, {@code "account_id"}, etc.
+ * The annotations lock the inbound field names to camelCase (e.g. {@code "eventId"}) so that
+ * request and response contracts are symmetric for clients.
+ * Jackson honours annotations on private fields by merging them with the matching public getter
+ * when building the property descriptor.
+ */
 @Schema(description = "Payload for submitting a new transaction event")
 public class EventRequest {
 
