@@ -10,6 +10,7 @@ A Spring Boot REST API for recording and querying financial transaction events w
 |------|----------------|-------|
 | Java | 17 | `java -version` |
 | Maven | 3.6 | `mvn -version` |
+| Docker | 24 (Compose V2) | `docker compose version` |
 
 ---
 
@@ -58,6 +59,30 @@ Surefire HTML and XML reports are written to `target/surefire-reports/`.
 ```bash
 mvn clean package
 java -jar target/event-ledger-0.0.1-SNAPSHOT.jar
+```
+
+---
+
+## Run with Docker
+
+Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine + Compose plugin).
+
+```bash
+docker compose up --build
+```
+
+The first run downloads base images and compiles the project inside the builder stage — subsequent runs reuse the cached dependency layer and are much faster.
+
+To run in the background:
+
+```bash
+docker compose up --build -d
+```
+
+Stop and remove the container:
+
+```bash
+docker compose down
 ```
 
 ---
