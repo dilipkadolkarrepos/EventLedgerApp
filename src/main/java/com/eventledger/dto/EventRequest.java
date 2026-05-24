@@ -11,31 +11,44 @@ import java.util.Map;
 
 public class EventRequest {
 
-    @NotBlank
-    @JsonProperty("event_id")
+    /**
+     * Caller-supplied idempotency key.  Must be unique across all events.
+     */
+    @NotBlank(message = "eventId must not be blank")
+    @JsonProperty("eventId")
     private String eventId;
 
-    @NotBlank
-    @JsonProperty("account_id")
+    @NotBlank(message = "accountId must not be blank")
+    @JsonProperty("accountId")
     private String accountId;
 
-    @Pattern(regexp = "CREDIT|DEBIT")
+    /**
+     * Direction of the transaction.
+     * <p>
+     * {@code @NotBlank} is included alongside {@code @Pattern} because
+     * JSR-380 {@code @Pattern} skips {@code null} values and would silently
+     * accept a missing field otherwise.
+     */
+    @NotBlank(message = "type must not be blank")
+    @Pattern(regexp = "CREDIT|DEBIT", message = "type must be CREDIT or DEBIT")
     @JsonProperty("type")
     private String type;
 
-    @NotNull
-    @DecimalMin(value = "0.0", inclusive = false)
+    @NotNull(message = "amount must not be null")
+    @DecimalMin(value = "0.0", inclusive = false, message = "amount must be greater than zero")
     @JsonProperty("amount")
     private BigDecimal amount;
 
-    @NotBlank
+    @NotBlank(message = "currency must not be blank")
     @JsonProperty("currency")
     private String currency;
 
-    @NotBlank
-    @JsonProperty("event_timestamp")
+    /** ISO-8601 timestamp string, e.g. {@code 2024-01-15T10:30:00Z}. */
+    @NotBlank(message = "eventTimestamp must not be blank")
+    @JsonProperty("eventTimestamp")
     private String eventTimestamp;
 
+    /** Optional free-form JSON object; may be {@code null}. */
     @JsonProperty("metadata")
     private Map<String, Object> metadata;
 
