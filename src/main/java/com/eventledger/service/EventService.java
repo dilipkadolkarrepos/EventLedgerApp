@@ -13,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,19 +38,37 @@ public class EventService {
     }
 
     /**
-     * Submits an event, guaranteeing exactly-once persistence via the business key.
-     * If an event with the same eventId already exists the existing record is returned
-     * immediately — no second write occurs. Callers can distinguish a fresh save from
-     * a replay via {@link SubmitResult#isNew()}.
+     * Submits an event, guaranteeing exactly-once persistence even under concurrent
+     * requests for the same {@code eventId}.
+     *
+     * <h3>Serial duplicate (idempotency fast-path)</h3>
+     * {@link EventRepository#findByEventId} is checked first. If a record already
+     * exists it is returned immediately — {@code save()} is never called.
+     *
+     * <h3>Concurrent duplicate (race-condition path)</h3>
+     * Two threads can both pass the {@code findByEventId} check before either has
+     * committed. The second thread to call {@code save()} hits the {@code UNIQUE}
+     * constraint on {@code event_id} and receives a {@link DataIntegrityViolationException}.
+     * That exception is caught here; the winner's record is re-fetched from the database
+     * and returned with {@code isNew = false} — the same contract as a serial duplicate.
+     *
+     * <h3>Why there is no {@code @Transactional} on this method</h3>
+     * If this method ran inside one transaction, Hibernate would mark the session as
+     * <em>rollback-only</em> the moment {@code save()} triggered the constraint error,
+     * making a subsequent {@code findByEventId} call impossible within the same session.
+     * Without an outer transaction each repository call gets its own short transaction
+     * (courtesy of {@code SimpleJpaRepository}), so the failed save rolls back cleanly
+     * and the re-query opens a fresh read transaction.
      */
-    @Transactional
     public SubmitResult submitEvent(EventRequest request) {
+        // ── 1. Serial duplicate fast-path ────────────────────────────────────
         Optional<TransactionEvent> existing = eventRepository.findByEventId(request.getEventId());
         if (existing.isPresent()) {
             log.debug("Duplicate submission for eventId={}, returning existing record", request.getEventId());
             return new SubmitResult(EventResponse.from(existing.get()), false);
         }
 
+        // ── 2. Build entity ──────────────────────────────────────────────────
         Instant eventTimestamp = parseEventTimestamp(request.getEventTimestamp());
         String metadataJson = serializeMetadata(request);
 
@@ -62,9 +81,22 @@ public class EventService {
         event.setEventTimestamp(eventTimestamp);
         event.setMetadata(metadataJson);
 
-        TransactionEvent saved = eventRepository.save(event);
-        log.info("Persisted new event eventId={} accountId={}", saved.getEventId(), saved.getAccountId());
-        return new SubmitResult(EventResponse.from(saved), true);
+        // ── 3. Persist — handle concurrent duplicate ─────────────────────────
+        try {
+            TransactionEvent saved = eventRepository.save(event);
+            log.info("Persisted new event eventId={} accountId={}", saved.getEventId(), saved.getAccountId());
+            return new SubmitResult(EventResponse.from(saved), true);
+        } catch (DataIntegrityViolationException ex) {
+            // Another thread committed the same eventId between our check and our save.
+            // Re-read the winner's record and treat this like a normal duplicate (200).
+            log.debug("Concurrent duplicate detected for eventId={}, re-querying winner record",
+                    request.getEventId());
+            return eventRepository.findByEventId(request.getEventId())
+                    .map(e -> new SubmitResult(EventResponse.from(e), false))
+                    .orElseThrow(() -> new IllegalStateException(
+                            "UNIQUE constraint fired on event_id but record not found: "
+                            + request.getEventId(), ex));
+        }
     }
 
     /**

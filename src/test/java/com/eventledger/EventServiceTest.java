@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -25,6 +26,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -86,6 +88,36 @@ class EventServiceTest {
         assertThat(result.isNew()).isTrue();
         assertThat(result.getResponse().getEventId()).isEqualTo("evt-002");
         verify(eventRepository).save(any(TransactionEvent.class));
+    }
+
+    /**
+     * Simulates the race window: both threads pass the findByEventId check, then
+     * the second thread's save() hits the UNIQUE constraint. The service must catch
+     * DataIntegrityViolationException, re-read the winner's record, and return it
+     * with isNew=false — indistinguishable from a serial duplicate to the caller.
+     */
+    @Test
+    void submitEvent_concurrentDuplicate_catchesConstraintAndReturnsExisting() {
+        TransactionEvent winner = sampleEvent("evt-race");
+
+        // First call: fast-path check returns empty (both threads passed it).
+        // Second call: after the constraint fires, re-query returns the winner's record.
+        when(eventRepository.findByEventId("evt-race"))
+                .thenReturn(Optional.empty(), Optional.of(winner));
+
+        // save() simulates the UNIQUE constraint violation thrown by the DB.
+        when(eventRepository.save(any(TransactionEvent.class)))
+                .thenThrow(new DataIntegrityViolationException("Unique constraint on event_id"));
+
+        SubmitResult result = eventService.submitEvent(
+                buildRequest("evt-race", "CREDIT", "100.00", "2026-05-01T10:00:00Z"));
+
+        assertThat(result.isNew()).isFalse();
+        assertThat(result.getResponse().getEventId()).isEqualTo("evt-race");
+        // findByEventId called twice: once at the top (fast-path), once after catch (re-query).
+        verify(eventRepository, times(2)).findByEventId("evt-race");
+        // save attempted exactly once — the failed attempt is not retried.
+        verify(eventRepository, times(1)).save(any(TransactionEvent.class));
     }
 
     // ─────────────────────────────────────────────────────────

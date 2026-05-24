@@ -12,8 +12,13 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
+import org.springframework.test.web.servlet.MvcResult;
+
+import java.util.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
@@ -372,6 +377,69 @@ class EventControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.status").value(400))
                 .andExpect(jsonPath("$.details[0]", containsString("size must be <= 100")));
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // CONCURRENCY — simultaneous POSTs for the same eventId
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Ten threads all POST the same eventId at the same moment.
+     * <ul>
+     *   <li>Exactly one must receive <b>201 Created</b> (the thread that won the DB race).</li>
+     *   <li>All others must receive <b>200 OK</b> (treated as duplicates, not errors).</li>
+     *   <li>No thread may receive <b>500</b>.</li>
+     *   <li>Exactly <b>one row</b> must exist in the database afterwards.</li>
+     * </ul>
+     * The service handles this with an optimistic check-then-act pattern: on a
+     * {@code DataIntegrityViolationException} from the UNIQUE constraint it re-reads
+     * and returns the winner's record instead of propagating the error.
+     */
+    @Test
+    void concurrentDuplicateSubmissions_exactlyOneRecordCreated() throws Exception {
+        int threadCount = 10;
+        CountDownLatch startGate = new CountDownLatch(1);   // holds all threads until released
+        CountDownLatch doneLatch  = new CountDownLatch(threadCount);
+        List<Integer> statusCodes = Collections.synchronizedList(new ArrayList<>());
+
+        String body = objectMapper.writeValueAsString(
+                buildEvent("evt-concurrent-001", "acc-concurrent", "CREDIT", 100.0,
+                        "2026-05-24T10:00:00Z"));
+
+        for (int i = 0; i < threadCount; i++) {
+            new Thread(() -> {
+                try {
+                    startGate.await();   // block until all threads are ready
+                    MvcResult result = mockMvc.perform(
+                                    MockMvcRequestBuilders.post(EVENTS_URL)
+                                            .contentType(MediaType.APPLICATION_JSON)
+                                            .content(body))
+                            .andReturn();
+                    statusCodes.add(result.getResponse().getStatus());
+                } catch (Exception e) {
+                    statusCodes.add(500);   // unexpected — surfaces as a test failure below
+                } finally {
+                    doneLatch.countDown();
+                }
+            }).start();
+        }
+
+        startGate.countDown();  // release all threads simultaneously
+        boolean allDone = doneLatch.await(15, TimeUnit.SECONDS);
+
+        assertThat(allDone).as("All threads must complete within 15 s").isTrue();
+        assertThat(statusCodes).hasSize(threadCount);
+        assertThat(statusCodes).as("No thread should receive 500").doesNotContain(500);
+        assertThat(statusCodes.stream().filter(s -> s == 201).count())
+                .as("Exactly one thread should create the event (201)").isEqualTo(1);
+        assertThat(statusCodes.stream().filter(s -> s == 200).count())
+                .as("All other threads should see the existing event (200)").isEqualTo(threadCount - 1);
+
+        // Confirm the DB-level guarantee: only one row was written.
+        Integer rowCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM transaction_events WHERE event_id = 'evt-concurrent-001'",
+                Integer.class);
+        assertThat(rowCount).as("Only one row must be persisted").isEqualTo(1);
     }
 
     // ─────────────────────────────────────────────────────────
