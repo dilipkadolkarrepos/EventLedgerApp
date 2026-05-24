@@ -11,6 +11,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -76,10 +78,10 @@ public class EventService {
     }
 
     /**
-     * Returns the full ordered ledger for an account.
+     * Returns the full, unsliced ordered ledger for an account.
      * Ordering is by the business-supplied {@code eventTimestamp}, not by insertion
-     * time, so out-of-order arrivals (delayed producers, retries) produce a
-     * chronologically correct history regardless of when each event was received.
+     * time, so out-of-order arrivals produce a chronologically correct history.
+     * Retained for internal/test use; the API layer calls the paginated overload.
      */
     @Transactional(readOnly = true)
     public List<EventResponse> getEventsByAccount(String accountId) {
@@ -87,6 +89,18 @@ public class EventService {
                 .stream()
                 .map(EventResponse::from)
                 .toList();
+    }
+
+    /**
+     * Returns a paginated, chronologically ordered ledger for an account.
+     * Sort direction is enforced by the {@link Pageable} passed from the controller
+     * ({@code eventTimestamp ASC}), so out-of-order arrivals are transparently
+     * reordered at query time regardless of physical insertion order.
+     */
+    @Transactional(readOnly = true)
+    public Page<EventResponse> getEventsByAccount(String accountId, Pageable pageable) {
+        return eventRepository.findByAccountId(accountId, pageable)
+                .map(EventResponse::from);
     }
 
     /**

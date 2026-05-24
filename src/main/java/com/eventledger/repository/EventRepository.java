@@ -1,6 +1,8 @@
 package com.eventledger.repository;
 
 import com.eventledger.model.TransactionEvent;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -29,11 +31,18 @@ public interface EventRepository extends JpaRepository<TransactionEvent, Long> {
     /**
      * Returns all events for an account sorted by the business-supplied event
      * timestamp rather than by insertion time ({@code received_at}).
-     * Events may arrive out of order (delayed producers, retries), so sorting by
-     * {@code eventTimestamp} gives a chronologically correct ledger view regardless
-     * of when each record was physically written to the database.
+     * Retained for internal use; prefer {@link #findByAccountId(String, Pageable)}
+     * for API-facing queries where callers control page size.
      */
     List<TransactionEvent> findByAccountIdOrderByEventTimestampAsc(String accountId);
+
+    /**
+     * Returns a paginated slice of events for an account.
+     * The caller must supply a {@link Pageable} that includes an explicit sort;
+     * {@code Sort.by("eventTimestamp").ascending()} produces a chronologically
+     * correct ledger regardless of physical insertion order.
+     */
+    Page<TransactionEvent> findByAccountId(String accountId, Pageable pageable);
 
     /**
      * Computes the net balance for an account in a single database round-trip.

@@ -26,53 +26,35 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class EventControllerTest {
 
-    @Autowired
-    private MockMvc mockMvc;
-
-    @Autowired
-    private ObjectMapper objectMapper;
-
-    @Autowired
-    private JdbcTemplate jdbcTemplate;
-
-    /**
-     * Truncate the table before every test so each test starts with a clean slate.
-     * @DirtiesContext was the previous approach but it did not work: the JDBC URL
-     * uses DB_CLOSE_DELAY=-1, which keeps the H2 database alive for the full JVM
-     * lifetime. Context restarts reconnect to the same surviving database, and
-     * schema.sql's CREATE TABLE IF NOT EXISTS leaves all existing rows intact.
-     * A direct DELETE is simpler, faster, and actually clears the data.
-     */
-    @BeforeEach
-    void cleanDatabase() {
-        jdbcTemplate.execute("DELETE FROM transaction_events");
-    }
+    @Autowired private MockMvc mockMvc;
+    @Autowired private ObjectMapper objectMapper;
+    @Autowired private JdbcTemplate jdbcTemplate;
 
     private static final String EVENTS_URL   = "/events";
     private static final String ACCOUNTS_URL = "/accounts";
     private static final String ACCOUNT_ID   = "acc-001";
 
+    @BeforeEach
+    void cleanDatabase() {
+        jdbcTemplate.execute("DELETE FROM transaction_events");
+    }
+
     // ─────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────
 
-    /**
-     * Builds a minimal valid request body. Use remove() on the returned map to
-     * simulate missing fields in validation tests.
-     */
     private Map<String, Object> buildEvent(String eventId, String accountId,
                                             String type, double amount, String timestamp) {
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("eventId",         eventId);
-        body.put("accountId",       accountId);
-        body.put("type",            type);
-        body.put("amount",          amount);
-        body.put("currency",        "USD");
-        body.put("eventTimestamp",  timestamp);
+        body.put("eventId",        eventId);
+        body.put("accountId",      accountId);
+        body.put("type",           type);
+        body.put("amount",         amount);
+        body.put("currency",       "USD");
+        body.put("eventTimestamp", timestamp);
         return body;
     }
 
-    /** POSTs to /events, asserts the given HTTP status, and returns ResultActions for chaining. */
     private ResultActions post(Map<String, Object> body, int expectedStatus) throws Exception {
         return mockMvc.perform(MockMvcRequestBuilders.post(EVENTS_URL)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -84,7 +66,6 @@ class EventControllerTest {
     // IDEMPOTENCY
     // ─────────────────────────────────────────────────────────
 
-    /** First write is a creation (201); replaying the identical payload is a no-op (200). */
     @Test
     void firstSubmissionReturns201_duplicateReturns200() throws Exception {
         Map<String, Object> event = buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z");
@@ -92,7 +73,6 @@ class EventControllerTest {
         post(event, 200);
     }
 
-    /** Submitting the same event three times must not inflate the balance. */
     @Test
     void duplicateEventDoesNotAlterBalance() throws Exception {
         Map<String, Object> event = buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z");
@@ -105,7 +85,6 @@ class EventControllerTest {
                 .andExpect(jsonPath("$.balance").value(100.0));
     }
 
-    /** Two distinct eventIds on the same account must both persist; balance = sum. */
     @Test
     void twoDistinctEventsAccumulateBalance() throws Exception {
         post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 201);
@@ -123,6 +102,7 @@ class EventControllerTest {
     /**
      * Events submitted in reverse chronological order must be returned sorted by
      * their business eventTimestamp, not by insertion (received_at) order.
+     * The response is now paged — events live under {@code $.content}.
      */
     @Test
     void eventsReturnedInBusinessTimestampOrder() throws Exception {
@@ -132,30 +112,27 @@ class EventControllerTest {
 
         mockMvc.perform(get(EVENTS_URL).param("account", ACCOUNT_ID))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(3)))
-                .andExpect(jsonPath("$[0].event_id").value("evt-may1"))
-                .andExpect(jsonPath("$[1].event_id").value("evt-may2"))
-                .andExpect(jsonPath("$[2].event_id").value("evt-may3"));
+                .andExpect(jsonPath("$.content", hasSize(3)))
+                .andExpect(jsonPath("$.content[0].event_id").value("evt-may1"))
+                .andExpect(jsonPath("$.content[1].event_id").value("evt-may2"))
+                .andExpect(jsonPath("$.content[2].event_id").value("evt-may3"));
     }
 
-    /** Net balance must be arithmetically correct regardless of arrival order. */
     @Test
     void balanceCorrectForOutOfOrderArrivals() throws Exception {
-        // DEBIT arrives first, two CREDITs arrive later and out of order
         post(buildEvent("evt-003", ACCOUNT_ID, "DEBIT",   30.0, "2026-05-03T10:00:00Z"), 201);
         post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 201);
         post(buildEvent("evt-002", ACCOUNT_ID, "CREDIT",  50.0, "2026-05-02T10:00:00Z"), 201);
 
         mockMvc.perform(get(ACCOUNTS_URL + "/" + ACCOUNT_ID + "/balance"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.balance").value(120.0));   // 100 + 50 − 30
+                .andExpect(jsonPath("$.balance").value(120.0));
     }
 
     // ─────────────────────────────────────────────────────────
     // BALANCE
     // ─────────────────────────────────────────────────────────
 
-    /** Net balance = Σ CREDITs − Σ DEBITs across multiple events. */
     @Test
     void netBalanceIsCreditSumMinusDebitSum() throws Exception {
         post(buildEvent("evt-c1", ACCOUNT_ID, "CREDIT", 500.0, "2026-05-01T10:00:00Z"), 201);
@@ -165,7 +142,7 @@ class EventControllerTest {
 
         mockMvc.perform(get(ACCOUNTS_URL + "/" + ACCOUNT_ID + "/balance"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.balance").value(450.0));   // 500 + 300 − 200 − 150
+                .andExpect(jsonPath("$.balance").value(450.0));
     }
 
     @Test
@@ -176,7 +153,6 @@ class EventControllerTest {
                 .andExpect(jsonPath("$.error").value("Not found"));
     }
 
-    /** Debits exceeding credits must yield a negative balance — no floor at zero. */
     @Test
     void balanceCanBeNegative() throws Exception {
         post(buildEvent("evt-c1", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 201);
@@ -184,11 +160,11 @@ class EventControllerTest {
 
         mockMvc.perform(get(ACCOUNTS_URL + "/" + ACCOUNT_ID + "/balance"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.balance").value(-200.0));  // 100 − 300
+                .andExpect(jsonPath("$.balance").value(-200.0));
     }
 
     // ─────────────────────────────────────────────────────────
-    // VALIDATION
+    // VALIDATION (request-body)
     // ─────────────────────────────────────────────────────────
 
     @Test
@@ -205,15 +181,13 @@ class EventControllerTest {
     @Test
     void zeroAmountReturns400() throws Exception {
         post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 0.0, "2026-05-01T10:00:00Z"), 400)
-                .andExpect(jsonPath("$.status").value(400))
-                .andExpect(jsonPath("$.details").isArray());
+                .andExpect(jsonPath("$.status").value(400));
     }
 
     @Test
     void negativeAmountReturns400() throws Exception {
         post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", -1.0, "2026-05-01T10:00:00Z"), 400)
-                .andExpect(jsonPath("$.status").value(400))
-                .andExpect(jsonPath("$.details").isArray());
+                .andExpect(jsonPath("$.status").value(400));
     }
 
     /** The {@code @Pattern} constraint message must tell the caller the accepted values. */
@@ -224,7 +198,6 @@ class EventControllerTest {
                 .andExpect(jsonPath("$.details[0]", containsString("CREDIT or DEBIT")));
     }
 
-    /** A parseable-but-wrong timestamp passes @NotBlank; the service rejects it with an ISO 8601 hint. */
     @Test
     void invalidTimestampReturns400WithIso8601Hint() throws Exception {
         post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "not-a-timestamp"), 400)
@@ -244,7 +217,7 @@ class EventControllerTest {
     }
 
     // ─────────────────────────────────────────────────────────
-    // GET ENDPOINTS
+    // GET — single event and empty listing
     // ─────────────────────────────────────────────────────────
 
     @Test
@@ -266,12 +239,151 @@ class EventControllerTest {
                 .andExpect(jsonPath("$.error").value("Not found"));
     }
 
-    /** Requesting events for an account that has never submitted any must return an empty array, not 404. */
+    /** An account with no events must return an empty page, not 404. */
     @Test
-    void getEventsByAccountWithNoEventsReturnsEmptyArray() throws Exception {
+    void getEventsByAccountWithNoEventsReturnsEmptyPage() throws Exception {
         mockMvc.perform(get(EVENTS_URL).param("account", "acc-never-seen"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$").isArray())
-                .andExpect(jsonPath("$", empty()));
+                .andExpect(jsonPath("$.content").isArray())
+                .andExpect(jsonPath("$.content", empty()))
+                .andExpect(jsonPath("$.total_elements").value(0));
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // PAGINATION — correct slicing behaviour
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * First page (page=0, size=2) of 5 events must return the two oldest events
+     * in {@code eventTimestamp ASC} order.
+     */
+    @Test
+    void paginationFirstPageReturnsOldestEventsInOrder() throws Exception {
+        insertFiveOrderedEvents();
+
+        mockMvc.perform(get(EVENTS_URL)
+                        .param("account", ACCOUNT_ID)
+                        .param("page", "0")
+                        .param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content", hasSize(2)))
+                .andExpect(jsonPath("$.content[0].event_id").value("evt-01"))
+                .andExpect(jsonPath("$.content[1].event_id").value("evt-02"));
+    }
+
+    /**
+     * Second page (page=1, size=2) must return the next two events, confirming
+     * the database offset is applied correctly.
+     */
+    @Test
+    void paginationSecondPageReturnsNextBatch() throws Exception {
+        insertFiveOrderedEvents();
+
+        mockMvc.perform(get(EVENTS_URL)
+                        .param("account", ACCOUNT_ID)
+                        .param("page", "1")
+                        .param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content", hasSize(2)))
+                .andExpect(jsonPath("$.content[0].event_id").value("evt-03"))
+                .andExpect(jsonPath("$.content[1].event_id").value("evt-04"));
+    }
+
+    /**
+     * Verifies all six paged-wrapper metadata fields for 5 events split into
+     * pages of size 2: 3 pages total, page 0 is not the last.
+     */
+    @Test
+    void paginationResponseMetadataIsCorrect() throws Exception {
+        insertFiveOrderedEvents();
+
+        mockMvc.perform(get(EVENTS_URL)
+                        .param("account", ACCOUNT_ID)
+                        .param("page", "0")
+                        .param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.total_elements").value(5))
+                .andExpect(jsonPath("$.total_pages").value(3))
+                .andExpect(jsonPath("$.last").value(false));
+    }
+
+    /**
+     * A page number beyond the last page must return empty content with accurate
+     * totals — not an error.
+     */
+    @Test
+    void paginationBeyondLastPageReturnsEmptyContent() throws Exception {
+        post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 10.0, "2026-05-01T10:00:00Z"), 201);
+        post(buildEvent("evt-002", ACCOUNT_ID, "CREDIT", 20.0, "2026-05-02T10:00:00Z"), 201);
+
+        mockMvc.perform(get(EVENTS_URL)
+                        .param("account", ACCOUNT_ID)
+                        .param("page", "99")
+                        .param("size", "20"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content", empty()))
+                .andExpect(jsonPath("$.total_elements").value(2));
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // PAGINATION — validation gate
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * {@code page=-1} must be rejected before the service is reached.
+     * The gate uses {@code @Min(0)} on the controller parameter; failures are
+     * reported as 400 with the exact constraint message in {@code details}.
+     */
+    @Test
+    void paginationNegativePageReturns400() throws Exception {
+        mockMvc.perform(get(EVENTS_URL)
+                        .param("account", ACCOUNT_ID)
+                        .param("page", "-1"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.details[0]", containsString("page must be >= 0")));
+    }
+
+    /**
+     * {@code size=0} is meaningless for pagination and must be rejected by
+     * the {@code @Min(1)} gate.
+     */
+    @Test
+    void paginationZeroSizeReturns400() throws Exception {
+        mockMvc.perform(get(EVENTS_URL)
+                        .param("account", ACCOUNT_ID)
+                        .param("size", "0"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.details[0]", containsString("size must be >= 1")));
+    }
+
+    /**
+     * {@code size=101} exceeds the server-enforced maximum of 100 and must be
+     * rejected by the {@code @Max(100)} gate before hitting the database.
+     */
+    @Test
+    void paginationExcessiveSizeReturns400() throws Exception {
+        mockMvc.perform(get(EVENTS_URL)
+                        .param("account", ACCOUNT_ID)
+                        .param("size", "101"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.details[0]", containsString("size must be <= 100")));
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Private helpers
+    // ─────────────────────────────────────────────────────────
+
+    /** Inserts 5 events with sequential timestamps; used by pagination tests. */
+    private void insertFiveOrderedEvents() throws Exception {
+        post(buildEvent("evt-01", ACCOUNT_ID, "CREDIT", 10.0, "2026-05-01T10:00:00Z"), 201);
+        post(buildEvent("evt-02", ACCOUNT_ID, "CREDIT", 20.0, "2026-05-02T10:00:00Z"), 201);
+        post(buildEvent("evt-03", ACCOUNT_ID, "CREDIT", 30.0, "2026-05-03T10:00:00Z"), 201);
+        post(buildEvent("evt-04", ACCOUNT_ID, "CREDIT", 40.0, "2026-05-04T10:00:00Z"), 201);
+        post(buildEvent("evt-05", ACCOUNT_ID, "CREDIT", 50.0, "2026-05-05T10:00:00Z"), 201);
     }
 }

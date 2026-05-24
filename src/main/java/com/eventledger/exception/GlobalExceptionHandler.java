@@ -1,6 +1,8 @@
 package com.eventledger.exception;
 
 import com.eventledger.dto.ErrorResponse;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.ConstraintViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -41,6 +43,33 @@ public class GlobalExceptionHandler {
                 HttpStatus.BAD_REQUEST.value(),
                 "Validation failed",
                 "One or more fields failed validation",
+                details
+        );
+        return ResponseEntity.badRequest().body(body);
+    }
+
+    /**
+     * Fired by Spring AOP when {@code @Min}/{@code @Max} constraints on controller
+     * method parameters fail (e.g. pagination {@code page}/{@code size}).
+     * Distinct from {@link MethodArgumentNotValidException}, which covers
+     * {@code @Valid} on request bodies. Both return the same 400 shape so callers
+     * need only one error-handling path.
+     */
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ResponseEntity<ErrorResponse> handleConstraintViolation(ConstraintViolationException ex) {
+        List<String> details = ex.getConstraintViolations()
+                .stream()
+                .map(ConstraintViolation::getMessage)
+                .filter(Objects::nonNull)
+                .sorted()
+                .toList();
+
+        log.debug("Query parameter validation failed: {}", details);
+
+        ErrorResponse body = new ErrorResponse(
+                HttpStatus.BAD_REQUEST.value(),
+                "Validation failed",
+                "One or more query parameters failed validation",
                 details
         );
         return ResponseEntity.badRequest().body(body);
