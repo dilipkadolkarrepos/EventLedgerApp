@@ -1,13 +1,13 @@
 package com.eventledger;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
-import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.annotation.DirtiesContext.ClassMode;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
@@ -24,7 +24,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @SpringBootTest
 @AutoConfigureMockMvc
-@DirtiesContext(classMode = ClassMode.BEFORE_EACH_TEST_METHOD)
 class EventControllerTest {
 
     @Autowired
@@ -32,6 +31,22 @@ class EventControllerTest {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    /**
+     * Truncate the table before every test so each test starts with a clean slate.
+     * @DirtiesContext was the previous approach but it did not work: the JDBC URL
+     * uses DB_CLOSE_DELAY=-1, which keeps the H2 database alive for the full JVM
+     * lifetime. Context restarts reconnect to the same surviving database, and
+     * schema.sql's CREATE TABLE IF NOT EXISTS leaves all existing rows intact.
+     * A direct DELETE is simpler, faster, and actually clears the data.
+     */
+    @BeforeEach
+    void cleanDatabase() {
+        jdbcTemplate.execute("DELETE FROM transaction_events");
+    }
 
     private static final String EVENTS_URL   = "/events";
     private static final String ACCOUNTS_URL = "/accounts";
