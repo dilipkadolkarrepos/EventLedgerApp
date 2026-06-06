@@ -1,27 +1,56 @@
 package com.eventledger;
 
+import com.eventledger.dto.EventRequest;
+import com.eventledger.kafka.EventProducer;
+import com.eventledger.service.EventService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.kafka.support.SendResult;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * Controller-layer tests for the event-driven EventController.
+ *
+ * <h3>Architecture note (updated for Kafka)</h3>
+ * <p>POST /events now publishes to Kafka and returns {@code 202 Accepted}.
+ * Persistence is handled asynchronously by the Kafka consumer.
+ * To keep these tests fast and deterministic, {@link EventProducer} is mocked
+ * with {@code @MockBean} and configured to call {@link EventService#submitEvent}
+ * synchronously on each invocation — simulating immediate processing so that
+ * balance and GET assertions work without async waiting.</p>
+ *
+ * <h3>What changed vs. the original tests</h3>
+ * <ul>
+ *   <li>All POST assertions now expect {@code 202} (not {@code 201} or {@code 200})</li>
+ *   <li>Timestamp format validation no longer returns 400 from the controller;
+ *       it is handled asynchronously in the consumer (→ DLQ)</li>
+ *   <li>{@code EventProducer} is mocked; Kafka infrastructure is NOT required</li>
+ * </ul>
+ */
 @SpringBootTest
 @AutoConfigureMockMvc
 class EventControllerTest {
@@ -35,31 +64,51 @@ class EventControllerTest {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    private EventService eventService;
+
     /**
-     * Truncate the table before every test so each test starts with a clean slate.
-     * @DirtiesContext was the previous approach but it did not work: the JDBC URL
-     * uses DB_CLOSE_DELAY=-1, which keeps the H2 database alive for the full JVM
-     * lifetime. Context restarts reconnect to the same surviving database, and
-     * schema.sql's CREATE TABLE IF NOT EXISTS leaves all existing rows intact.
-     * A direct DELETE is simpler, faster, and actually clears the data.
+     * Mock the Kafka producer so tests do not need a live broker.
+     * The mock is configured in {@link #setUp()} to call EventService synchronously
+     * for every sendEvent() call, making DB state immediately consistent.
      */
+    @MockBean
+    private EventProducer eventProducer;
+
     @BeforeEach
-    void cleanDatabase() {
+    void setUp() {
+        // Clean DB before each test
         jdbcTemplate.execute("DELETE FROM transaction_events");
+
+        // Configure mock: call EventService synchronously, then return a completed future.
+        // Business errors (e.g. bad timestamps) are swallowed here — they would go to DLQ
+        // in production but that is tested separately in EventProducerConsumerIntegrationTest.
+        when(eventProducer.sendEvent(any(EventRequest.class))).thenAnswer(invocation -> {
+            EventRequest req = invocation.getArgument(0);
+            try {
+                eventService.submitEvent(req);
+            } catch (Exception ignored) {
+                // Mirrors consumer DLQ routing: failures do not propagate to the caller
+            }
+            // Return a successfully completed future (broker ack simulated)
+            CompletableFuture<SendResult<String, EventRequest>> future = new CompletableFuture<>();
+            @SuppressWarnings("unchecked")
+            SendResult<String, EventRequest> mockResult =
+                    new SendResult<>(
+                            new ProducerRecord<>("ledger.events.inbound", req.getEventId(), req),
+                            new RecordMetadata(null, 0L, 0, 0L, 0, 0)
+                    );
+            future.complete(mockResult);
+            return future;
+        });
     }
 
     private static final String EVENTS_URL   = "/events";
     private static final String ACCOUNTS_URL = "/accounts";
     private static final String ACCOUNT_ID   = "acc-001";
 
-    // ─────────────────────────────────────────────────────────
-    // Helpers
-    // ─────────────────────────────────────────────────────────
+    // ── helpers ───────────────────────────────────────────────────────────────
 
-    /**
-     * Builds a minimal valid request body. Use remove() on the returned map to
-     * simulate missing fields in validation tests.
-     */
     private Map<String, Object> buildEvent(String eventId, String accountId,
                                             String type, double amount, String timestamp) {
         Map<String, Object> body = new LinkedHashMap<>();
@@ -72,7 +121,10 @@ class EventControllerTest {
         return body;
     }
 
-    /** POSTs to /events, asserts the given HTTP status, and returns ResultActions for chaining. */
+    /**
+     * POSTs to /events, asserts the given HTTP status, and returns ResultActions for chaining.
+     * <p>NOTE: with the event-driven design, all successful submissions return {@code 202}.</p>
+     */
     private ResultActions post(Map<String, Object> body, int expectedStatus) throws Exception {
         return mockMvc.perform(MockMvcRequestBuilders.post(EVENTS_URL)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -80,25 +132,26 @@ class EventControllerTest {
                 .andExpect(status().is(expectedStatus));
     }
 
-    // ─────────────────────────────────────────────────────────
-    // IDEMPOTENCY
-    // ─────────────────────────────────────────────────────────
+    // ── IDEMPOTENCY ──────────────────────────────────────────────────────────
 
-    /** First write is a creation (201); replaying the identical payload is a no-op (200). */
+    /**
+     * Both first and duplicate submissions return 202 Accepted.
+     * The idempotency guard lives in EventService — only one record is persisted.
+     */
     @Test
-    void firstSubmissionReturns201_duplicateReturns200() throws Exception {
+    void firstSubmissionAndDuplicateBothReturn202() throws Exception {
         Map<String, Object> event = buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z");
-        post(event, 201);
-        post(event, 200);
+        post(event, 202);
+        post(event, 202);
     }
 
     /** Submitting the same event three times must not inflate the balance. */
     @Test
     void duplicateEventDoesNotAlterBalance() throws Exception {
         Map<String, Object> event = buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z");
-        post(event, 201);
-        post(event, 200);
-        post(event, 200);
+        post(event, 202);
+        post(event, 202);
+        post(event, 202);
 
         mockMvc.perform(get(ACCOUNTS_URL + "/" + ACCOUNT_ID + "/balance"))
                 .andExpect(status().isOk())
@@ -108,27 +161,21 @@ class EventControllerTest {
     /** Two distinct eventIds on the same account must both persist; balance = sum. */
     @Test
     void twoDistinctEventsAccumulateBalance() throws Exception {
-        post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 201);
-        post(buildEvent("evt-002", ACCOUNT_ID, "CREDIT",  50.0, "2026-05-02T10:00:00Z"), 201);
+        post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 202);
+        post(buildEvent("evt-002", ACCOUNT_ID, "CREDIT",  50.0, "2026-05-02T10:00:00Z"), 202);
 
         mockMvc.perform(get(ACCOUNTS_URL + "/" + ACCOUNT_ID + "/balance"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.balance").value(150.0));
     }
 
-    // ─────────────────────────────────────────────────────────
-    // OUT-OF-ORDER ARRIVAL
-    // ─────────────────────────────────────────────────────────
+    // ── OUT-OF-ORDER ARRIVAL ─────────────────────────────────────────────────
 
-    /**
-     * Events submitted in reverse chronological order must be returned sorted by
-     * their business eventTimestamp, not by insertion (received_at) order.
-     */
     @Test
     void eventsReturnedInBusinessTimestampOrder() throws Exception {
-        post(buildEvent("evt-may3", ACCOUNT_ID, "CREDIT", 30.0, "2026-05-03T10:00:00Z"), 201);
-        post(buildEvent("evt-may1", ACCOUNT_ID, "CREDIT", 10.0, "2026-05-01T10:00:00Z"), 201);
-        post(buildEvent("evt-may2", ACCOUNT_ID, "CREDIT", 20.0, "2026-05-02T10:00:00Z"), 201);
+        post(buildEvent("evt-may3", ACCOUNT_ID, "CREDIT", 30.0, "2026-05-03T10:00:00Z"), 202);
+        post(buildEvent("evt-may1", ACCOUNT_ID, "CREDIT", 10.0, "2026-05-01T10:00:00Z"), 202);
+        post(buildEvent("evt-may2", ACCOUNT_ID, "CREDIT", 20.0, "2026-05-02T10:00:00Z"), 202);
 
         mockMvc.perform(get(EVENTS_URL).param("account", ACCOUNT_ID))
                 .andExpect(status().isOk())
@@ -138,34 +185,29 @@ class EventControllerTest {
                 .andExpect(jsonPath("$[2].event_id").value("evt-may3"));
     }
 
-    /** Net balance must be arithmetically correct regardless of arrival order. */
     @Test
     void balanceCorrectForOutOfOrderArrivals() throws Exception {
-        // DEBIT arrives first, two CREDITs arrive later and out of order
-        post(buildEvent("evt-003", ACCOUNT_ID, "DEBIT",   30.0, "2026-05-03T10:00:00Z"), 201);
-        post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 201);
-        post(buildEvent("evt-002", ACCOUNT_ID, "CREDIT",  50.0, "2026-05-02T10:00:00Z"), 201);
+        post(buildEvent("evt-003", ACCOUNT_ID, "DEBIT",   30.0, "2026-05-03T10:00:00Z"), 202);
+        post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 202);
+        post(buildEvent("evt-002", ACCOUNT_ID, "CREDIT",  50.0, "2026-05-02T10:00:00Z"), 202);
 
         mockMvc.perform(get(ACCOUNTS_URL + "/" + ACCOUNT_ID + "/balance"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.balance").value(120.0));   // 100 + 50 − 30
+                .andExpect(jsonPath("$.balance").value(120.0));
     }
 
-    // ─────────────────────────────────────────────────────────
-    // BALANCE
-    // ─────────────────────────────────────────────────────────
+    // ── BALANCE ──────────────────────────────────────────────────────────────
 
-    /** Net balance = Σ CREDITs − Σ DEBITs across multiple events. */
     @Test
     void netBalanceIsCreditSumMinusDebitSum() throws Exception {
-        post(buildEvent("evt-c1", ACCOUNT_ID, "CREDIT", 500.0, "2026-05-01T10:00:00Z"), 201);
-        post(buildEvent("evt-c2", ACCOUNT_ID, "CREDIT", 300.0, "2026-05-02T10:00:00Z"), 201);
-        post(buildEvent("evt-d1", ACCOUNT_ID, "DEBIT",  200.0, "2026-05-03T10:00:00Z"), 201);
-        post(buildEvent("evt-d2", ACCOUNT_ID, "DEBIT",  150.0, "2026-05-04T10:00:00Z"), 201);
+        post(buildEvent("evt-c1", ACCOUNT_ID, "CREDIT", 500.0, "2026-05-01T10:00:00Z"), 202);
+        post(buildEvent("evt-c2", ACCOUNT_ID, "CREDIT", 300.0, "2026-05-02T10:00:00Z"), 202);
+        post(buildEvent("evt-d1", ACCOUNT_ID, "DEBIT",  200.0, "2026-05-03T10:00:00Z"), 202);
+        post(buildEvent("evt-d2", ACCOUNT_ID, "DEBIT",  150.0, "2026-05-04T10:00:00Z"), 202);
 
         mockMvc.perform(get(ACCOUNTS_URL + "/" + ACCOUNT_ID + "/balance"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.balance").value(450.0));   // 500 + 300 − 200 − 150
+                .andExpect(jsonPath("$.balance").value(450.0));
     }
 
     @Test
@@ -176,20 +218,17 @@ class EventControllerTest {
                 .andExpect(jsonPath("$.error").value("Not found"));
     }
 
-    /** Debits exceeding credits must yield a negative balance — no floor at zero. */
     @Test
     void balanceCanBeNegative() throws Exception {
-        post(buildEvent("evt-c1", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 201);
-        post(buildEvent("evt-d1", ACCOUNT_ID, "DEBIT",  300.0, "2026-05-02T10:00:00Z"), 201);
+        post(buildEvent("evt-c1", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 202);
+        post(buildEvent("evt-d1", ACCOUNT_ID, "DEBIT",  300.0, "2026-05-02T10:00:00Z"), 202);
 
         mockMvc.perform(get(ACCOUNTS_URL + "/" + ACCOUNT_ID + "/balance"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.balance").value(-200.0));  // 100 − 300
+                .andExpect(jsonPath("$.balance").value(-200.0));
     }
 
-    // ─────────────────────────────────────────────────────────
-    // VALIDATION
-    // ─────────────────────────────────────────────────────────
+    // ── BEAN VALIDATION (controller layer, synchronous) ──────────────────────
 
     @Test
     void missingEventIdReturns400WithDetails() throws Exception {
@@ -216,7 +255,6 @@ class EventControllerTest {
                 .andExpect(jsonPath("$.details").isArray());
     }
 
-    /** The {@code @Pattern} constraint message must tell the caller the accepted values. */
     @Test
     void invalidTypeReturns400WithCreditDebitHint() throws Exception {
         post(buildEvent("evt-001", ACCOUNT_ID, "TRANSFER", 100.0, "2026-05-01T10:00:00Z"), 400)
@@ -224,12 +262,17 @@ class EventControllerTest {
                 .andExpect(jsonPath("$.details[0]", containsString("CREDIT or DEBIT")));
     }
 
-    /** A parseable-but-wrong timestamp passes @NotBlank; the service rejects it with an ISO 8601 hint. */
+    /**
+     * An invalid ISO-8601 timestamp passes @NotBlank and is accepted by the controller (202).
+     * The format validation now happens asynchronously in the Kafka consumer and routes
+     * the event to the dead-letter topic. See EventProducerConsumerIntegrationTest for
+     * the full DLQ routing test.
+     */
     @Test
-    void invalidTimestampReturns400WithIso8601Hint() throws Exception {
-        post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "not-a-timestamp"), 400)
-                .andExpect(jsonPath("$.status").value(400))
-                .andExpect(jsonPath("$.message", containsString("ISO 8601")));
+    void invalidTimestampIsAcceptedByControllerAndRoutedToDlqAsynchronously() throws Exception {
+        post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "not-a-timestamp"), 202)
+                .andExpect(jsonPath("$.event_id").value("evt-001"))
+                .andExpect(jsonPath("$.message").value("Event received and queued for processing"));
     }
 
     @Test
@@ -243,13 +286,11 @@ class EventControllerTest {
                 .andExpect(jsonPath("$.details", hasSize(1)));
     }
 
-    // ─────────────────────────────────────────────────────────
-    // GET ENDPOINTS
-    // ─────────────────────────────────────────────────────────
+    // ── GET ENDPOINTS ─────────────────────────────────────────────────────────
 
     @Test
     void getEventByIdFound() throws Exception {
-        post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 201);
+        post(buildEvent("evt-001", ACCOUNT_ID, "CREDIT", 100.0, "2026-05-01T10:00:00Z"), 202);
 
         mockMvc.perform(get(EVENTS_URL + "/evt-001"))
                 .andExpect(status().isOk())
@@ -266,7 +307,6 @@ class EventControllerTest {
                 .andExpect(jsonPath("$.error").value("Not found"));
     }
 
-    /** Requesting events for an account that has never submitted any must return an empty array, not 404. */
     @Test
     void getEventsByAccountWithNoEventsReturnsEmptyArray() throws Exception {
         mockMvc.perform(get(EVENTS_URL).param("account", "acc-never-seen"))

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Kafka Event-Driven Implementation — Final Test Report</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 40px; color: #222; }
+  h1 { color: #1a237e; }
+  h2 { color: #283593; border-bottom: 2px solid #3949ab; padding-bottom:6px; }
+  h3 { color: #37474f; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+  th { background: #283593; color: #fff; padding: 10px 14px; text-align: left; }
+  td { padding: 8px 14px; border: 1px solid #c5cae9; }
+  tr:nth-child(even) { background: #e8eaf6; }
+  .pass  { background: #c8e6c9 !important; color: #1b5e20; font-weight: bold; }
+  .fail  { background: #ffcdd2 !important; color: #b71c1c; font-weight: bold; }
+  .info  { background: #e3f2fd !important; }
+  .badge-pass { background:#2e7d32; color:#fff; border-radius:4px; padding:2px 8px; }
+  .badge-fail { background:#c62828; color:#fff; border-radius:4px; padding:2px 8px; }
+  .summary-box { border:2px solid #3949ab; border-radius:8px; padding:20px; background:#e8eaf6; max-width:640px; }
+  pre { background:#f5f5f5; border:1px solid #ddd; padding:12px; border-radius:4px; font-size:13px; overflow-x:auto; }
+  .arch-flow { font-family: monospace; background: #263238; color: #80cbc4; padding: 16px; border-radius: 6px; font-size: 13px; }
+  footer { margin-top:40px; color:#888; font-size:12px; border-top:1px solid #ddd; padding-top:12px; }
+</style>
+</head>
+<body>
+
+<h1>🚀 EventLedgerAppKafka — Kafka Event-Driven Implementation</h1>
+<h2>Final Test Report</h2>
+
+<table style="width:auto; margin-bottom:8px;">
+  <tr><td><strong>Project</strong></td><td>EventLedgerAppKafka / EventLedgerApp</td></tr>
+  <tr><td><strong>Framework</strong></td><td>Spring Boot 3.4.5 · Java 17 (Microsoft OpenJDK 17.0.16) · Maven 3.9.16</td></tr>
+  <tr><td><strong>Kafka Version</strong></td><td>Apache Kafka 3.7.1 (Scala 2.13)</td></tr>
+  <tr><td><strong>Report Generated</strong></td><td>2026-06-06</td></tr>
+  <tr><td><strong>Test Execution Time</strong></td><td>~85 seconds (full suite)</td></tr>
+</table>
+
+<div class="summary-box">
+  <h3 style="margin-top:0">📊 Overall Summary</h3>
+  <table style="width:auto; border:none; margin:0;">
+    <tr><td style="border:none; padding:4px 12px 4px 0;"><strong>Total Tests</strong></td><td style="border:none;"><span style="font-size:22px; font-weight:bold; color:#283593;">27</span></td></tr>
+    <tr><td style="border:none; padding:4px 12px 4px 0;"><strong>Passed</strong></td><td style="border:none;"><span style="font-size:22px; font-weight:bold; color:#2e7d32;">27</span></td></tr>
+    <tr><td style="border:none; padding:4px 12px 4px 0;"><strong>Failed</strong></td><td style="border:none;"><span style="font-size:22px; font-weight:bold; color:#c62828;">0</span></td></tr>
+    <tr><td style="border:none; padding:4px 12px 4px 0;"><strong>Errors</strong></td><td style="border:none;">0</td></tr>
+    <tr><td style="border:none; padding:4px 12px 4px 0;"><strong>Skipped</strong></td><td style="border:none;">0</td></tr>
+    <tr><td style="border:none; padding:4px 12px 4px 0;"><strong>Build Status</strong></td><td style="border:none;"><span class="badge-pass">✅ BUILD SUCCESS</span></td></tr>
+  </table>
+</div>
+
+<br>
+
+<h2>Architecture Overview</h2>
+<div class="arch-flow">
+REST POST /ledger/events
+        │
+        ▼
+  EventController
+  (validates @NotBlank, @Pattern, @NotNull via Bean Validation)
+        │  HTTP 202 Accepted
+        ▼
+  EventProducer ──────────► [ledger.events.inbound]  (3 partitions, 7-day retention)
+                                       │
+                                       ▼
+                               EventConsumer  (groupId: event-ledger-consumer-group)
+                                       │
+                          ┌────────────┴───────────────┐
+                          ▼                            ▼
+                   EventService                 InvalidEventException
+                   .submitEvent()               or system error
+                          │                            │
+                    ┌─────┴──────┐             [ledger.events.dead-letter]
+                    ▼            ▼             (1 partition, 30-day retention)
+              H2 Database  [ledger.events.processed]   │
+                           (3 partitions)         DeadLetterConsumer
+                                                       │
+REST GET /ledger/events/**  ◄── H2 DB          GET /ledger/dead-letter/recent
+REST GET /ledger/accounts/**/balance                GET /ledger/dead-letter/count
+GET  /ledger/actuator/health
+</div>
+
+<br>
+<h2>Phase Completion Summary</h2>
+<table>
+  <tr><th>#</th><th>Phase</th><th>Description</th><th>Status</th></tr>
+  <tr class="pass"><td>0.1</td><td>Prerequisites Check</td><td>Java 17, Ports 2181+9092, Disk 11GB, RAM 7.89GB, Maven 3.9.16</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>0.2–0.4</td><td>Kafka Installation</td><td>Kafka 3.7.1 extracted to C:\kafka\kafka · Zookeeper + broker started</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>0.5–0.6</td><td>Topic Creation &amp; Smoke Test</td><td>3 topics created · CLI produce/consume round-trip verified</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>1</td><td>Maven Dependencies</td><td>spring-kafka + spring-kafka-test + actuator added to pom.xml</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>2</td><td>Kafka Config Beans</td><td>KafkaTopics constants + KafkaConfig with NewTopic beans</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>3</td><td>Kafka Producer</td><td>EventProducer component + EventController returns 202 Accepted</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>4</td><td>Kafka Consumer + E2E</td><td>EventConsumer with DLQ routing · Full round-trip E2E verified</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>5</td><td>Dead Letter Queue</td><td>DeadLetterConsumer + DeadLetterController /recent + /count</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>7</td><td>Actuator Health</td><td>/actuator/health returns 200 UP with db/diskSpace/ping components</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>8</td><td>Integration Tests</td><td>3 embedded Kafka tests: valid event, idempotency, invalid timestamp→DLQ</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>9</td><td>Regression Test</td><td>12 system-level cases — all PASS · Full mvn test BUILD SUCCESS</td><td>✅ PASS</td></tr>
+</table>
+
+<h2>Automated Test Results — Per Test Class</h2>
+
+<h3>1. EventControllerTest (17 tests)</h3>
+<table>
+  <tr><th>#</th><th>Test Method</th><th>Description</th><th>Status</th></tr>
+  <tr class="pass"><td>1</td><td>firstSubmissionAndDuplicateBothReturn202</td><td>Both new and duplicate POSTs return 202 Accepted</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>2</td><td>duplicateEventDoesNotAlterBalance</td><td>Three POSTs with same eventId result in balance = 100.00</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>3</td><td>twoDistinctEventsAccumulateBalance</td><td>Two distinct CREDITs sum to 150.00</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>4</td><td>eventsReturnedInBusinessTimestampOrder</td><td>Out-of-order arrivals sorted by eventTimestamp not receivedAt</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>5</td><td>balanceCorrectForOutOfOrderArrivals</td><td>DEBIT first + 2 CREDITs later = balance 120.00</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>6</td><td>netBalanceIsCreditSumMinusDebitSum</td><td>500+300-200-150 = 450.00</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>7</td><td>unknownAccountBalanceReturns404</td><td>GET balance for unknown account → 404 Not Found</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>8</td><td>balanceCanBeNegative</td><td>100 CREDIT - 300 DEBIT = -200.00</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>9</td><td>missingEventIdReturns400WithDetails</td><td>Bean validation: missing eventId → 400 with details array</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>10</td><td>zeroAmountReturns400</td><td>amount=0 fails @DecimalMin → 400</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>11</td><td>negativeAmountReturns400</td><td>amount=-1 fails @DecimalMin → 400</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>12</td><td>invalidTypeReturns400WithCreditDebitHint</td><td>type=TRANSFER fails @Pattern → 400 with hint</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>13</td><td>invalidTimestampIsAcceptedByControllerAndRoutedToDlqAsynchronously</td><td>Bad timestamp passes @NotBlank → 202 (DLQ routing is async)</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>14</td><td>missingAccountIdReturns400WithDetails</td><td>Missing accountId → 400 with details</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>15</td><td>getEventByIdFound</td><td>GET /events/{eventId} returns full EventResponse</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>16</td><td>getEventByIdNotFound</td><td>GET /events/nonexistent → 404</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>17</td><td>getEventsByAccountWithNoEventsReturnsEmptyArray</td><td>GET /events?account=unknown → 200 []</td><td>✅ PASS</td></tr>
+</table>
+
+<h3>2. EventServiceTest (7 tests)</h3>
+<table>
+  <tr><th>#</th><th>Test Method</th><th>Status</th></tr>
+  <tr class="pass"><td>1</td><td>submitEvent — new event persisted with isNew=true</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>2</td><td>submitEvent — duplicate returns existing with isNew=false</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>3</td><td>getEventById — found by business key</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>4</td><td>getEventById — throws EventNotFoundException for unknown id</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>5</td><td>getEventsByAccount — sorted by eventTimestamp asc</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>6</td><td>getBalance — net CREDIT minus DEBIT</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>7</td><td>getBalance — throws EventNotFoundException for unknown account</td><td>✅ PASS</td></tr>
+</table>
+
+<h3>3. EventProducerConsumerIntegrationTest (3 tests, Embedded Kafka)</h3>
+<table>
+  <tr><th>#</th><th>Test Method</th><th>Description</th><th>Status</th></tr>
+  <tr class="pass"><td>1</td><td>givenValidEvent_whenPublishedViaProducer_thenPersistedByConsumer</td><td>Full Kafka round-trip: publish → consume → DB persist verified</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>2</td><td>givenDuplicateEvent_whenPublishedTwice_thenOnlyOneRecordPersisted</td><td>Two identical publishes → exactly 1 DB record (idempotency)</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>3</td><td>givenEventWithInvalidTimestamp_whenPublished_thenNotPersisted</td><td>Invalid timestamp → routes to DLQ → event NOT in DB</td><td>✅ PASS</td></tr>
+</table>
+
+<h2>System Regression Test (12 Cases)</h2>
+<table>
+  <tr><th>#</th><th>Test Case</th><th>Expected</th><th>Actual</th><th>Status</th></tr>
+  <tr class="pass"><td>TC01</td><td>POST valid CREDIT 100.00 for ACC-REGR</td><td>HTTP 202 + event_id in body</td><td>202 ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC02</td><td>GET /events/regr-001</td><td>HTTP 200 + full EventResponse</td><td>200 ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC03</td><td>GET /accounts/ACC-REGR/balance after CREDIT 100</td><td>HTTP 200, balance=100.0000</td><td>200, 100.0000 ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC04</td><td>POST DEBIT 30.00 for ACC-REGR</td><td>HTTP 202</td><td>202 ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC05</td><td>GET balance after DEBIT 30 (expect 70)</td><td>HTTP 200, balance=70.0000</td><td>200, 70.0000 ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC06</td><td>POST duplicate of regr-001 (idempotency)</td><td>HTTP 202, same eventId</td><td>202 ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC07</td><td>GET /events?account=ACC-REGR (should be 2 not 3)</td><td>HTTP 200, array of 2 events</td><td>200, 2 events ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC08</td><td>POST with missing eventId</td><td>HTTP 400 with validation details</td><td>400 ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC09</td><td>GET /events/nonexistent-regr-999</td><td>HTTP 404</td><td>404 ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC10</td><td>GET /dead-letter/count</td><td>HTTP 200, {"count":0}</td><td>200, 0 ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC11</td><td>GET /actuator/health</td><td>HTTP 200, status=UP</td><td>200, UP ✓</td><td>✅ PASS</td></tr>
+  <tr class="pass"><td>TC12</td><td>mvn test (full automated suite)</td><td>BUILD SUCCESS, 0 failures</td><td>27/27 PASS ✓</td><td>✅ PASS</td></tr>
+</table>
+
+<h2>Files Created / Modified</h2>
+<table>
+  <tr><th>Action</th><th>File</th><th>Purpose</th></tr>
+  <tr><td>CREATED</td><td>src/main/java/com/eventledger/config/KafkaTopics.java</td><td>Topic name constants</td></tr>
+  <tr><td>CREATED</td><td>src/main/java/com/eventledger/config/KafkaConfig.java</td><td>NewTopic beans + DLQ container factory</td></tr>
+  <tr><td>CREATED</td><td>src/main/java/com/eventledger/kafka/EventProducer.java</td><td>Kafka producer component</td></tr>
+  <tr><td>CREATED</td><td>src/main/java/com/eventledger/kafka/EventConsumer.java</td><td>Inbound topic consumer with DLQ routing</td></tr>
+  <tr><td>CREATED</td><td>src/main/java/com/eventledger/kafka/DeadLetterConsumer.java</td><td>DLQ consumer with in-memory ring buffer</td></tr>
+  <tr><td>CREATED</td><td>src/main/java/com/eventledger/controller/DeadLetterController.java</td><td>REST endpoints: /dead-letter/recent and /count</td></tr>
+  <tr><td>CREATED</td><td>src/test/java/com/eventledger/kafka/EventProducerConsumerIntegrationTest.java</td><td>Embedded Kafka integration tests (3 cases)</td></tr>
+  <tr><td>MODIFIED</td><td>pom.xml</td><td>Added spring-kafka, spring-kafka-test, actuator dependencies</td></tr>
+  <tr><td>MODIFIED</td><td>src/main/resources/application.properties</td><td>Full Kafka + Actuator configuration</td></tr>
+  <tr><td>MODIFIED</td><td>src/main/java/com/eventledger/controller/EventController.java</td><td>POST now publishes to Kafka → HTTP 202</td></tr>
+  <tr><td>MODIFIED</td><td>src/test/java/com/eventledger/EventControllerTest.java</td><td>Updated for async architecture (MockBean producer, 202 status)</td></tr>
+  <tr><td>INSTALLED</td><td>C:\kafka\kafka\ (Kafka 3.7.1)</td><td>Zookeeper + broker with 3 application topics</td></tr>
+</table>
+
+<h2>Kafka Topics Verified</h2>
+<table>
+  <tr><th>Topic</th><th>Partitions</th><th>Replication</th><th>Retention</th><th>Purpose</th></tr>
+  <tr><td>ledger.events.inbound</td><td>3</td><td>1</td><td>7 days</td><td>Raw EventRequest from REST API</td></tr>
+  <tr><td>ledger.events.processed</td><td>3</td><td>1</td><td>7 days</td><td>Confirmation after successful DB persistence</td></tr>
+  <tr><td>ledger.events.dead-letter</td><td>1</td><td>1</td><td>30 days</td><td>Failed events for operational review</td></tr>
+</table>
+
+<h2>Key Design Decisions</h2>
+<ul>
+  <li><strong>eventId as Kafka message key</strong> — ensures partition affinity and ordering per event; supports idempotency check in consumer</li>
+  <li><strong>acks=all + enable.idempotence=true</strong> — exactly-once delivery guarantee to the broker</li>
+  <li><strong>ack-mode=MANUAL_IMMEDIATE</strong> — offsets committed only after explicit acknowledge(); prevents message loss on consumer restart</li>
+  <li><strong>DLQ always acknowledged</strong> — both business failures and system errors commit the offset to avoid infinite retry on poison-pill messages</li>
+  <li><strong>GET endpoints bypass Kafka</strong> — reads remain synchronous and low-latency (no Kafka involved)</li>
+  <li><strong>Separate DLQ container factory</strong> — uses LinkedHashMap as value type to avoid class-cast errors from EventRequest deserializer</li>
+  <li><strong>MockBean in controller tests</strong> — keeps unit tests fast and deterministic without requiring a broker</li>
+  <li><strong>@EmbeddedKafka in integration tests</strong> — validates true round-trip behaviour without external infrastructure</li>
+</ul>
+
+<footer>
+  Generated by Claude — EventLedgerAppKafka Kafka Event-Driven Implementation · 2026-06-06
+</footer>
+</body>
+</html>
